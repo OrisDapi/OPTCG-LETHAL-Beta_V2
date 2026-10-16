@@ -503,6 +503,49 @@
             font-size: 0.7rem; font-weight: 800; color: var(--text-muted); background: var(--bg-primary);
             border: 1px solid var(--border-color); flex-shrink: 0; margin-right: 4px;
         }
+
+        /* ── Event Counter Cards & Active DON ── */
+        .hand-card.val-3 {
+            background: linear-gradient(135deg, rgba(0, 210, 255, 0.25), rgba(58, 123, 213, 0.45));
+            border-color: #00d2ff;
+            color: #7ce8ff;
+            box-shadow: 0 0 10px rgba(0, 210, 255, 0.35);
+        }
+        .hand-card.val-4 {
+            background: linear-gradient(135deg, rgba(255, 107, 53, 0.3), rgba(230, 57, 70, 0.55));
+            border-color: #ff6b35;
+            color: #ffe066;
+            box-shadow: 0 0 12px rgba(255, 107, 53, 0.45);
+        }
+        .hand-card.val-4.dead-event {
+            opacity: 0.45;
+            border-style: dashed;
+            box-shadow: none;
+        }
+        .sim-info-row.active-don-row {
+            border-color: rgba(255, 107, 53, 0.45);
+            background: linear-gradient(135deg, var(--bg-card), rgba(255, 107, 53, 0.1));
+        }
+        .sim-info-row.zero-don-row {
+            border-color: rgba(0, 210, 255, 0.25);
+        }
+        .event-hint-tag {
+            display: inline-block; padding: 2px 7px; border-radius: 6px;
+            font-size: 0.7rem; font-weight: 700; margin-left: 6px;
+        }
+        .event-hint-tag.warn {
+            background: rgba(255, 107, 53, 0.2); color: #ff8c5a; border: 1px solid rgba(255, 107, 53, 0.4);
+        }
+        .event-hint-tag.zero {
+            background: rgba(0, 210, 255, 0.12); color: #66d9ff; border: 1px solid rgba(0, 210, 255, 0.3);
+        }
+        .tactical-box {
+            margin-top: 14px; padding: 12px 15px; border-radius: 10px;
+            background: linear-gradient(135deg, rgba(240, 178, 50, 0.08), rgba(165, 110, 255, 0.08));
+            border: 1px solid rgba(240, 178, 50, 0.3);
+            font-size: 0.83rem; color: var(--text-secondary); line-height: 1.6;
+        }
+        .tactical-box strong { color: var(--accent-gold); }
     </style>
 </head>
 <body>
@@ -1098,136 +1141,224 @@ function setDifficulty(diff) {
     generateNewScenario();
 }
 
+// ─── 手牌與反擊事件輔助函數 ─────────────────────────────
+// 手牌編碼：
+// 0 = 無側防（0K，可作為 0費事件 的棄牌代價）
+// 1 = 角色側防 +1000（1K）
+// 2 = 角色側防 +2000（2K）
+// 3 = 0費反擊事件 +3000（3K，不需留費，但每張需額外棄掉 1 張手牌）
+// 4 = 1費反擊事件 +4000（4K，每張需消耗對手 1 點留費 Active DON）
+function getHandCounts(hand) {
+    let c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0;
+    for (let i = 0; i < hand.length; i++) {
+        const v = hand[i];
+        if (v === 0) c0++;
+        else if (v === 1) c1++;
+        else if (v === 2) c2++;
+        else if (v === 3) c3++;
+        else if (v === 4) c4++;
+    }
+    return { c0, c1, c2, c3, c4 };
+}
+
+// 計算發動 u3 張「0費+3K事件」所需棄掉 u3 張手牌的所有最佳分支
+function getDiscardBranches(u3, rem0, rem1, rem2, rem3, rem4, newDon) {
+    if (u3 === 0) {
+        return [{ r0: rem0, r1: rem1, r2: rem2, r3: rem3, r4: rem4, desc: '' }];
+    }
+    const totalRem = rem0 + rem1 + rem2 + rem3 + rem4;
+    if (totalRem < u3) return []; // 手牌不足以支付棄牌代價，無法發動！
+
+    // 優先棄掉「0價值」的手牌：1. 無側防卡 (rem0)  2. 超出剩餘留費而無法發動的 1費4K事件
+    const d0 = Math.min(u3, rem0);
+    let need = u3 - d0;
+    const dead4 = Math.max(0, rem4 - newDon);
+    const d4Dead = Math.min(need, dead4);
+    need -= d4Dead;
+
+    const baseParts = [];
+    if (d0 > 0) baseParts.push(d0 > 1 ? `${d0}×無側防` : '無側防');
+    if (d4Dead > 0) baseParts.push(d4Dead > 1 ? `${d4Dead}×卡費4K` : '卡費4K');
+
+    if (need === 0) {
+        return [{
+            r0: rem0 - d0,
+            r1: rem1,
+            r2: rem2,
+            r3: rem3,
+            r4: rem4 - d4Dead,
+            desc: '棄' + baseParts.join('+')
+        }];
+    }
+
+    // 若無側防與廢件不夠棄，必須忍痛棄掉有防禦價值的手牌（枚舉可能棄法讓 DP 找最佳解）
+    const live4 = rem4 - d4Dead;
+    const branches = [];
+    for (let d1 = 0; d1 <= Math.min(need, rem1); d1++) {
+        for (let d3 = 0; d3 <= Math.min(need - d1, rem3); d3++) {
+            for (let d2 = 0; d2 <= Math.min(need - d1 - d3, rem2); d2++) {
+                const d4L = need - d1 - d3 - d2;
+                if (d4L >= 0 && d4L <= live4) {
+                    const parts = [...baseParts];
+                    if (d1 > 0) parts.push(d1 > 1 ? `${d1}×1K` : '1K');
+                    if (d3 > 0) parts.push(d3 > 1 ? `${d3}×3K事件` : '3K事件');
+                    if (d2 > 0) parts.push(d2 > 1 ? `${d2}×2K` : '2K');
+                    if (d4L > 0) parts.push(d4L > 1 ? `${d4L}×4K事件` : '4K事件');
+                    branches.push({
+                        r0: 0,
+                        r1: rem1 - d1,
+                        r2: rem2 - d2,
+                        r3: rem3 - d3,
+                        r4: live4 - d4L,
+                        desc: '棄' + parts.join('+')
+                    });
+                }
+            }
+        }
+    }
+    return branches;
+}
+
+// 快速判定防守方是否能存活（純數值 DP，供題目生成與全分配窮舉高速呼叫）
+function canDefenderSurviveFast(elig, blockers, life, hc, oppDon) {
+    const needed = life + 1 + blockers;
+    if (elig.length < needed) return true;
+
+    // 防守方最佳策略必定將 Blocker 與生命卡用於承受最高攻擊力的那幾下
+    // 剩餘最小的那幾下攻擊（共 elig.length - blockers - life 下）必須全部用手牌與事件防住
+    const sorted = [...elig].sort((a, b) => b.excess - a.excess);
+    const mustCounterAtks = sorted.slice(blockers + life);
+    const thresholds = mustCounterAtks.map(a => Math.max(1, a.excess + 1));
+
+    const memo = new Map();
+    function canCounterAll(idx, r0, r1, r2, r3, r4, rDon) {
+        if (idx >= thresholds.length) return true;
+        const key = `${idx},${r0},${r1},${r2},${r3},${r4},${rDon}`;
+        if (memo.has(key)) return memo.get(key);
+
+        const T = thresholds[idx];
+        const maxU4 = Math.min(r4, rDon, Math.ceil(T / 4));
+        for (let u4 = 0; u4 <= maxU4; u4++) {
+            const remAfter4 = T - u4 * 4;
+            const maxU3 = Math.min(r3, remAfter4 > 0 ? Math.ceil(remAfter4 / 3) : 0);
+            for (let u3 = 0; u3 <= maxU3; u3++) {
+                const remAfter3 = remAfter4 - u3 * 3;
+                const maxU2 = Math.min(r2, remAfter3 > 0 ? Math.ceil(remAfter3 / 2) : 0);
+                for (let u2 = 0; u2 <= maxU2; u2++) {
+                    const u1 = Math.max(0, remAfter3 - u2 * 2);
+                    if (u1 > r1) continue;
+
+                    const totalC = u1 + u2 * 2 + u3 * 3 + u4 * 4;
+                    if (u1 > 0 && totalC - 1 >= T) continue;
+                    if (u2 > 0 && totalC - 2 >= T) continue;
+                    if (u3 > 0 && totalC - 3 >= T) continue;
+                    if (u4 > 0 && totalC - 4 >= T) continue;
+
+                    const newDon = rDon - u4;
+                    const branches = getDiscardBranches(u3, r0, r1 - u1, r2 - u2, r3 - u3, r4 - u4, newDon);
+                    for (let bIdx = 0; bIdx < branches.length; bIdx++) {
+                        const br = branches[bIdx];
+                        if (canCounterAll(idx + 1, br.r0, br.r1, br.r2, br.r3, br.r4, newDon)) {
+                            memo.set(key, true);
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        memo.set(key, false);
+        return false;
+    }
+
+    return canCounterAll(0, hc.c0, hc.c1, hc.c2, hc.c3, hc.c4, oppDon || 0);
+}
+
 // ─── 題目品質評分引擎 ─────────────────────────────────
-// 核心理念：「差之毫釐，失之千里」
-// 好題目 = 唯一正解 + 多個誘人陷阱 + 極限容錯
+// 核心理念：「差之毫釐，失之千里」＋「留費事件卡心理博弈」
 function rateScenario(sc, opt, diff, targetLethal) {
     if (opt.isLethal !== targetLethal) return -1000;
 
     let score = 0;
     const isAdv = diff === 'advanced';
-    const totalCounterValue = sc.hand.reduce((s, c) => s + c, 0);
-    const counterCards = sc.hand.filter(c => c > 0).length;
+    const hc = getHandCounts(sc.hand);
     const needed = sc.life + 1 + sc.blockers;
     const totalAttackers = 1 + sc.myChars.length;
-    const n1 = sc.hand.filter(c => c === 1).length;
-    const n2 = sc.hand.filter(c => c === 2).length;
+    const hasEvent = hc.c3 > 0 || hc.c4 > 0;
+    const playable4K = Math.min(hc.c4, sc.oppDon || 0);
 
-    // ── 攻頻偏好：2~3 個攻擊者最精妙 ──
-    if (totalAttackers === 2) score += 30;
-    else if (totalAttackers === 3) score += 40;
+    // ── 攻頻偏好：2~3 個攻擊者最考驗單點突破與算力 ──
+    if (totalAttackers === 2) score += 35;
+    else if (totalAttackers === 3) score += 45;
     else if (totalAttackers === 4) score += 10;
     else score -= 50;
 
     if (targetLethal) {
-        // ═══ 可斬殺題：追求「差一點就不行」的極限精妙 ═══
+        // ═══ 可斬殺題：追求「唯一正解、直覺分配會踩雷」═══
 
-        // ① DON 極限容錯檢驗（最核心指標）
-        const optM1 = computeOptimal({ ...sc, donCards: Math.max(0, sc.donCards - 1) });
+        // ① DON 極限容錯檢驗（少 1 DON 即失敗 = 0 容錯極限題！）
+        const optM1 = computeOptimal({ ...sc, donCards: Math.max(0, sc.donCards - 1) }, true);
         if (!optM1.isLethal) {
-            // 少 1 DON 即死 → 0 容錯，極限題！
-            score += 80;
+            score += 95;
         } else {
-            const optM2 = computeOptimal({ ...sc, donCards: Math.max(0, sc.donCards - 2) });
-            if (!optM2.isLethal) score += 35;
-            else score -= 20; // DON 過於寬裕，缺乏張力
+            const optM2 = computeOptimal({ ...sc, donCards: Math.max(0, sc.donCards - 2) }, true);
+            if (!optM2.isLethal) score += 25;
+            else score -= 65; // DON 過於寬裕，淘汰
         }
 
-        // ② 「陷阱分配」檢驗：存在看似合理但會失敗的 DON 分配方式
-        if (opt.elig && opt.elig.length >= 2) {
-            let trapCount = 0;
-            const elig = opt.elig;
-
-            // 測試「平均分配」是否會失敗（常見直覺陷阱）
-            const evenDon = Math.floor(sc.donCards / elig.length);
-            const evenElig = elig.map(a => ({
-                ...a,
-                don: evenDon,
-                finalPower: a.power + evenDon,
-                excess: a.power + evenDon - sc.oppLeader
-            })).filter(a => a.finalPower >= sc.oppLeader);
-            if (evenElig.length >= needed) {
-                const evenOk = isLethalWithCounters(evenElig, sc.blockers, sc.life, n1, n2);
-                if (!evenOk) trapCount++; // 平均分配是陷阱！
-            }
-
-            // 測試「全灌最強角色」是否會失敗
-            const strongest = [...elig].sort((a, b) => b.power - a.power)[0];
-            const allInElig = elig.map(a => {
-                const d = a === strongest ? sc.donCards : 0;
-                const fp = a.power + d;
-                return { ...a, don: d, finalPower: fp, excess: fp - sc.oppLeader };
-            }).filter(a => a.finalPower >= sc.oppLeader);
-            if (allInElig.length >= needed) {
-                const allInOk = isLethalWithCounters(allInElig, sc.blockers, sc.life, n1, n2);
-                if (!allInOk) trapCount++; // 全灌最強也是陷阱！
-            }
-
-            // 測試「全灌最弱角色」是否會失敗
-            const weakest = [...elig].sort((a, b) => a.power - b.power)[0];
-            const boostWeakElig = elig.map(a => {
-                const d = a === weakest ? sc.donCards : 0;
-                const fp = a.power + d;
-                return { ...a, don: d, finalPower: fp, excess: fp - sc.oppLeader };
-            }).filter(a => a.finalPower >= sc.oppLeader);
-            if (boostWeakElig.length >= needed) {
-                const boostOk = isLethalWithCounters(boostWeakElig, sc.blockers, sc.life, n1, n2);
-                if (!boostOk) trapCount++;
-            }
-
-            score += trapCount * (isAdv ? 20 : 35);
+        // ② 反直覺突破檢驗：如果「無腦平均分配 (waterFillDon)」會失敗，但存在特殊分配能斬殺！
+        if (!opt.wfIsLethal) {
+            score += isAdv ? 65 : 95; // 平均分配會撞上事件卡或 Blocker 而失敗！頂級好題！
+        }
+        if (!opt.allInIsLethal) {
+            score += 35; // 無腦全灌單體也會失敗！
         }
 
-        // ③ 對手側防品質（要有足夠防禦力製造張力）
-        if (counterCards >= 1 && totalCounterValue >= 2) score += 15;
-        if (counterCards >= 2 && totalCounterValue >= 3) score += 15;
-        if (n2 >= 1) score += 10; // 有 2K 側防增加複雜度
-
-        // ④ 角色攻擊力差異（差異越大，DON 分配越有學問）
-        if (sc.myChars.length >= 1) {
-            const allPowers = [sc.myLeader, ...sc.myChars];
-            const maxP = Math.max(...allPowers);
-            const minP = Math.min(...allPowers);
-            if (maxP - minP >= 2) score += 15; // 攻擊力差距大，分配更考驗判斷
-            if (maxP - minP >= 3) score += 10;
+        // ③ 解空間狹窄度：正解佔所有合法分配的比例越低，越有「差之毫釐失之千里」感
+        if (opt.totalValidAllocs >= 3) {
+            const winRatio = opt.lethalAllocs / opt.totalValidAllocs;
+            if (opt.lethalAllocs === 1) score += 75; // 全場唯一解！
+            else if (opt.lethalAllocs === 2) score += 50;
+            else if (winRatio <= 0.30) score += 35;
+            else if (winRatio > 0.75) score -= 45; // 隨便分都會過，不夠刁鑽
         }
+
+        // ④ 棄子戰術加分（場上有誘餌角色，最佳解故意不給它 DON 而集中灌給主力）
+        if (opt.elig && opt.elig.length < totalAttackers) {
+            score += 45;
+        }
+
+        // ⑤ 事件卡與留費博弈加分
+        if (playable4K > 0) score += 40;
+        if (hc.c3 > 0) score += 40;
+        if (sc.oppDon > 0 && playable4K === 0 && hc.c3 === 0) score += 25; // 對手留費騙人
 
     } else {
-        // ═══ 無法斬殺題：追求「看似能殺實則差一口氣」的假斬殺陷阱 ═══
+        // ═══ 無法斬殺題：追求「看似穩殺，實則被事件卡／極限防線剛好擋死」═══
 
-        // ① 核心：基礎攻頻必須達標（不能一眼看出不行）
         if (opt.elig && opt.elig.length >= needed) {
-            score += 60;
+            score += 55;
 
-            // ② 測試「如果對手少 1 張側防」是否就能斬殺（極限假斬殺！）
-            if (counterCards >= 1) {
-                // 移除最弱的一張側防卡測試
-                const weakerHand = [...sc.hand];
-                const weakIdx = weakerHand.findIndex(c => c > 0);
-                if (weakIdx >= 0) {
-                    weakerHand[weakIdx] = 0;
-                    const wn1 = weakerHand.filter(c => c === 1).length;
-                    const wn2 = weakerHand.filter(c => c === 2).length;
-                    const wouldBeOk = isLethalWithCounters(opt.elig, sc.blockers, sc.life, wn1, wn2);
-                    if (wouldBeOk) {
-                        // 對手只要少一張側防就會被殺 → 極限假斬殺！
-                        score += 80;
-                    }
-                }
+            // ① 極限差一口氣檢驗：只要我方多 1 張 DON 就能斬殺！
+            const optP1 = computeOptimal({ ...sc, donCards: sc.donCards + 1 }, true);
+            if (optP1.isLethal) {
+                score += 105; // 僅差 1000 力量就能殺，最容易誤判硬衝的極限陷阱題！
+            } else {
+                const optP2 = computeOptimal({ ...sc, donCards: sc.donCards + 2 }, true);
+                if (optP2.isLethal) score += 40;
+                else score -= 60; // 差太多，一眼看出殺不死
             }
 
-            // ③ 側防品質恰好卡死斬殺線（不多不少）
-            if (totalCounterValue >= 2 && totalCounterValue <= 6) score += 20;
-            if (counterCards >= 2) score += 15;
-
+            // ② 「事件卡救命」檢驗：如果把對手的 3K/4K 事件卡換成普通 1K 側防，原本是可以斬殺的！
+            if (hasEvent) {
+                const downgradedHand = sc.hand.map(c => (c === 3 || c === 4) ? 1 : c);
+                const optWithoutEvent = computeOptimal({ ...sc, hand: downgradedHand }, true);
+                if (optWithoutEvent.isLethal) {
+                    score += 75; // 忽略對手留費事件卡就會中計！
+                }
+            }
         } else {
-            score -= 80; // 攻頻不夠的一眼假題
+            score -= 100;
         }
-
-        // ④ 避免 DON 嚴重不足的明顯無解題
-        const minDonNeeded = sc.myChars.reduce((s, p) => s + Math.max(0, sc.oppLeader - p), 0)
-                           + Math.max(0, sc.oppLeader - sc.myLeader);
-        if (sc.donCards < minDonNeeded * 0.5) score -= 40; // DON 明顯不夠
     }
 
     return score;
@@ -1243,9 +1374,10 @@ function generateNewScenario() {
     let best = null;
     let bestScore = -9999;
 
-    for (let i = 0; i < 200; i++) {
+    const iterations = isAdv ? 200 : 260;
+    for (let i = 0; i < iterations; i++) {
         const sc = createRandomScenario(diff);
-        const opt = computeOptimal(sc);
+        const opt = computeOptimal(sc, false);
         sc.isLethal = opt.isLethal;
         sc.optResult = opt;
 
@@ -1253,15 +1385,14 @@ function generateNewScenario() {
         if (score > bestScore) {
             bestScore = score;
             best = sc;
-            if (bestScore >= 140) break; // 頂級精妙題，直接採用
+            if (bestScore >= 210) break;
         }
     }
 
-    // 如果找不到符合目標的高分題，翻轉目標重找
     if (bestScore < 0) {
-        for (let i = 0; i < 100; i++) {
+        for (let i = 0; i < 120; i++) {
             const sc = createRandomScenario(diff);
-            const opt = computeOptimal(sc);
+            const opt = computeOptimal(sc, false);
             sc.isLethal = opt.isLethal;
             sc.optResult = opt;
             const score = rateScenario(sc, opt, diff, !targetLethal);
@@ -1288,83 +1419,220 @@ function createRandomScenario(diff) {
     // ── 我方角色（1~3 個，核心為 2~3 攻頻）──
     const numChars = isAdv
         ? (Math.random() < 0.35 ? 1 : 2)
-        : (Math.random() < 0.50 ? 1 : (Math.random() < 0.92 ? 2 : 3));
+        : (Math.random() < 0.40 ? 1 : (Math.random() < 0.90 ? 2 : 3));
 
-    // 角色攻擊力：刻意製造不對稱性（大小差異越大越有分配學問）
     const myChars = [];
     if (isAdv) {
-        const pools = [[4,5], [5,6], [6,7], [5,7], [4,7], [5,8], [6,8], [4,6]];
+        const pools = [[4,6], [5,6], [5,7], [6,7], [4,7], [5,8], [6,8], [5,5]];
         const chosen = pools[Math.floor(Math.random() * pools.length)];
         for (let i = 0; i < numChars; i++) myChars.push(chosen[i % chosen.length]);
     } else {
-        // 高手模式：更極端的攻擊力差異組合
-        const pools = [[4,8], [5,9], [4,7], [5,8], [6,9], [3,7], [4,9], [5,7], [6,8]];
+        // 高手模式：包含誘餌小角色與高攻打手的不對稱組合
+        const pools = [[4,8], [5,9], [4,7], [5,8], [6,9], [3,7,6], [4,6,8], [5,6,6], [5,5,7], [4,9]];
         const chosen = pools[Math.floor(Math.random() * pools.length)];
         for (let i = 0; i < numChars; i++) myChars.push(chosen[i % chosen.length]);
     }
 
     // ── 對方 Leader ──
-    const oppLeader = Math.random() < (isAdv ? 0.6 : 0.45) ? 5 : 6;
+    const oppLeader = Math.random() < (isAdv ? 0.55 : 0.45) ? 5 : 6;
 
     // ── 生命卡（0 或 1）──
-    const life = Math.random() < 0.60 ? 0 : 1;
+    const life = Math.random() < 0.62 ? 0 : 1;
 
     // ── Blocker（受攻頻限制）──
     const maxB = Math.max(0, (1 + numChars) - (life + 1));
     const blockers = isAdv
-        ? Math.min(maxB, Math.floor(Math.random() * 2))
-        : Math.min(maxB, Math.random() < 0.30 ? 0 : (Math.random() < 0.75 ? 1 : 2));
+        ? Math.min(maxB, Math.random() < 0.55 ? 0 : 1)
+        : Math.min(maxB, Math.random() < 0.35 ? 0 : (Math.random() < 0.82 ? 1 : 2));
 
-    // ── DON!! 卡：根據場面反推合理範圍 ──
-    // 計算最低斬殺 DON 需求
-    const allPowers = [myLeader, ...myChars].sort((a, b) => b - a);
-    const minDon = allPowers.slice(0, Math.min(allPowers.length, life + 1 + blockers))
-        .reduce((s, p) => s + Math.max(0, oppLeader - p), 0);
-    // DON 範圍：最低需求 ~ 最低需求+4（製造精確但不過度寬裕的題目）
-    const donCards = isAdv
-        ? Math.min(10, Math.max(3, minDon + Math.floor(Math.random() * 5)))
-        : Math.min(10, Math.max(2, minDon + Math.floor(Math.random() * 4)));
+    // ── 對手留費 (Active DON!!) 與手牌反擊事件設計 ──
+    // 70%+ 的對局會涉及「對手留費」或「0費/1費事件卡」
+    let oppDon = 0;
+    let hand = [];
+    const roll = Math.random();
 
-    // ── 對方手牌：精心設計側防組合 ──
-    const handSize = isAdv ? (2 + Math.floor(Math.random() * 3)) : (3 + Math.floor(Math.random() * 4));
-    const hand = [];
-
-    // 側防組合模式（而非純隨機，製造更有趣的防禦結構）
-    const patterns = isAdv
-        ? [[1,1,0], [1,0,0], [2,1,0], [1,1,1], [2,0,0], [0,1,0], [1,2,0]]
-        : [[2,1,1,0], [1,1,1,1], [2,2,1,0], [2,1,0,0], [1,2,1,1], [2,2,0,0], [1,1,2,0]];
-    const pat = patterns[Math.floor(Math.random() * patterns.length)];
-    for (let i = 0; i < handSize; i++) {
-        hand.push(pat[i % pat.length]);
+    if (roll < 0.36) {
+        // 情境 A：對手留 1 費，手握 1費+4K 事件（經典實戰防線）
+        oppDon = 1;
+        const templates = isAdv
+            ? [[4, 1, 0], [4, 0, 0], [4, 2, 0], [4, 1, 1], [4, 0]]
+            : [[4, 2, 0], [4, 1, 1], [4, 3, 0], [4, 2, 1, 0], [4, 1, 0], [4, 3, 1, 0]];
+        hand = [...templates[Math.floor(Math.random() * templates.length)]];
+    } else if (roll < 0.62) {
+        // 情境 B：對手 0 留費（或 1 留費），但手握「0費+3K事件（需棄1手牌）」突襲！
+        oppDon = Math.random() < 0.75 ? 0 : 1;
+        const templates = isAdv
+            ? [[3, 0, 1], [3, 0, 0], [3, 1, 1], [3, 2, 0], [3, 1]]
+            : [[3, 2, 0], [3, 1, 0], [3, 2, 1, 0], [3, 3, 0, 0], [3, 1, 1], [3, 4, 0]]; // 若 oppDon=0，4K事件為卡手廢牌可被3K事件棄掉！
+        hand = [...templates[Math.floor(Math.random() * templates.length)]];
+    } else if (roll < 0.78) {
+        // 情境 C：對手留 2 費（雙事件高壓防線，或留 2 費只握 1 張事件）
+        oppDon = 2;
+        const templates = isAdv
+            ? [[4, 1, 0], [4, 2, 0], [4, 0, 0]]
+            : [[4, 4, 0], [4, 3, 0], [4, 2, 1], [4, 1, 2, 0], [4, 4, 1, 0]];
+        hand = [...templates[Math.floor(Math.random() * templates.length)]];
+    } else if (roll < 0.90) {
+        // 情境 D：心理戰 Bluff（對手故意留 1~2 費嚇人，但手牌其實只有角色側防！）
+        oppDon = (!isAdv && Math.random() < 0.3) ? 2 : 1;
+        const templates = isAdv
+            ? [[2, 1, 0], [1, 1, 0], [2, 0, 0], [1, 1, 1]]
+            : [[2, 2, 0], [2, 1, 1], [2, 2, 1, 0], [1, 2, 0]];
+        hand = [...templates[Math.floor(Math.random() * templates.length)]];
+    } else {
+        // 情境 E：0 留費純手牌側防或卡費事件
+        oppDon = 0;
+        const templates = isAdv
+            ? [[2, 1, 0], [1, 1, 1], [2, 2, 0]]
+            : [[2, 2, 1, 0], [2, 2, 0], [4, 2, 1]]; // [4,2,1] 在 0 費時 4K 無法發動
+        hand = [...templates[Math.floor(Math.random() * templates.length)]];
     }
 
-    return { myLeader, myChars, donCards, oppLeader, blockers, life, handSize, hand };
+    // 打亂手牌顯示順序
+    for (let i = hand.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const tmp = hand[i]; hand[i] = hand[j]; hand[j] = tmp;
+    }
+    const handSize = hand.length;
+
+    // ── DON!! 卡數量：依場面防禦強度精準反推 ──
+    const allPowers = [myLeader, ...myChars].sort((a, b) => b - a);
+    const needed = life + 1 + blockers;
+    const minDon = allPowers.slice(0, Math.min(allPowers.length, needed))
+        .reduce((s, p) => s + Math.max(0, oppLeader - p), 0);
+    const eventBoost = (hand.includes(4) && oppDon > 0 ? 3 : 0) + (hand.includes(3) ? 2 : 0);
+    const donCards = Math.min(10, Math.max(2, minDon + 1 + Math.floor(Math.random() * (4 + eventBoost))));
+
+    return { myLeader, myChars, donCards, oppLeader, blockers, life, oppDon, handSize, hand };
 }
 
-function computeOptimal(sc) {
-    const atks = [{ name: 'Leader', power: sc.myLeader, icon: '👑' }];
-    for (let i = 0; i < sc.myChars.length; i++) atks.push({ name: '角色'+(i+1), power: sc.myChars[i], icon: '⚔️' });
-    const oL = sc.oppLeader, B = sc.blockers, life = sc.life, D = sc.donCards;
-    atks.forEach(a => { a.donNeeded = Math.max(0, oL - a.power); });
-    atks.sort((a,b) => a.donNeeded - b.donNeeded);
-    let used = 0; const elig = [];
-    for (const a of atks) {
+// ─── 全分配窮舉最佳解引擎 ─────────────────────────────
+function computeOptimal(sc, fastOnly) {
+    const baseAtks = [{ name: 'Leader', power: sc.myLeader, icon: '👑', origIdx: 0 }];
+    for (let i = 0; i < sc.myChars.length; i++) {
+        baseAtks.push({ name: '角色' + (i + 1), power: sc.myChars[i], icon: '⚔️', origIdx: i + 1 });
+    }
+    const n = baseAtks.length;
+    const oL = sc.oppLeader, B = sc.blockers, life = sc.life, D = sc.donCards, oppDon = sc.oppDon || 0;
+    const needed = life + 1 + B;
+    const hc = getHandCounts(sc.hand);
+
+    // 1. 先檢查基礎攻擊次數是否可能達標
+    const sortedByNeed = [...baseAtks].map(a => ({ ...a, donNeeded: Math.max(0, oL - a.power) }))
+        .sort((a, b) => a.donNeeded - b.donNeeded);
+    let used = 0;
+    const wfElig = [];
+    for (const a of sortedByNeed) {
         if (used + a.donNeeded <= D) {
-            elig.push({ ...a, don: a.donNeeded, finalPower: a.power + a.donNeeded, excess: a.power + a.donNeeded - oL });
+            wfElig.push({ ...a, don: a.donNeeded, finalPower: a.power + a.donNeeded, excess: a.power + a.donNeeded - oL });
             used += a.donNeeded;
         }
     }
-    const needed = life + 1 + B;
-    if (elig.length < needed) return { isLethal: false, reason: '攻擊次數不足', elig, plan: [] };
-    waterFillDon(elig, D - used);
-    const n1 = sc.hand.filter(c => c===1).length, n2 = sc.hand.filter(c => c===2).length;
-    const ok = isLethalWithCounters(elig, B, life, n1, n2);
-    const plan = buildPlan(elig, B, life, oL, n1, n2);
-    return { isLethal: ok, elig, plan };
+    if (wfElig.length < needed) {
+        return { isLethal: false, reason: '攻擊次數不足', elig: wfElig, plan: [], totalValidAllocs: 0, lethalAllocs: 0, wfIsLethal: false, allInIsLethal: false };
+    }
+
+    // 2. 計算傳統「平均分配 (waterFillDon)」結果
+    waterFillDon(wfElig, D - used);
+    const wfIsLethal = !canDefenderSurviveFast(wfElig, B, life, hc, oppDon);
+
+    // 3. 計算「全灌最強單體 (All-In)」結果
+    const allInElig = sortedByNeed.slice(0, wfElig.length).map(a => ({
+        ...a, don: a.donNeeded, finalPower: a.power + a.donNeeded, excess: a.power + a.donNeeded - oL
+    }));
+    const remAllIn = D - allInElig.reduce((s, a) => s + a.don, 0);
+    allInElig.sort((a, b) => b.finalPower - a.finalPower);
+    allInElig[0].don += remAllIn;
+    allInElig[0].finalPower += remAllIn;
+    allInElig[0].excess += remAllIn;
+    const allInIsLethal = !canDefenderSurviveFast(allInElig, B, life, hc, oppDon);
+
+    // 4. 窮舉所有合法的 DON 分配組合 (d_0, d_1, ..., d_{n-1})，找出真正的數學最佳解！
+    let totalValidAllocs = 0;
+    let lethalAllocs = 0;
+    let bestLethalElig = wfIsLethal ? wfElig : null;
+    let bestLethalScore = -9999;
+
+    const currentDon = new Array(n).fill(0);
+    function enumDon(idx, rem) {
+        if (idx === n - 1) {
+            currentDon[idx] = rem;
+            // 檢查是否有把 DON 分給仍未達門檻的角色（浪費 DON）
+            let activeCount = 0;
+            for (let i = 0; i < n; i++) {
+                const fp = baseAtks[i].power + currentDon[i];
+                if (currentDon[i] > 0 && fp < oL) return;
+                if (fp >= oL) activeCount++;
+            }
+            if (activeCount < needed) return;
+
+            totalValidAllocs++;
+            const candElig = [];
+            for (let i = 0; i < n; i++) {
+                const fp = baseAtks[i].power + currentDon[i];
+                if (fp >= oL) {
+                    candElig.push({
+                        ...baseAtks[i],
+                        don: currentDon[i],
+                        finalPower: fp,
+                        excess: fp - oL
+                    });
+                }
+            }
+
+            const survives = canDefenderSurviveFast(candElig, B, life, hc, oppDon);
+            if (!survives) {
+                lethalAllocs++;
+                // 挑選最具突破力且清晰的斬殺分配（優先考慮有效突破防線的分配）
+                const desc = [...candElig].sort((a, b) => b.excess - a.excess);
+                const unblocked = desc.slice(B + life);
+                const minUnblocked = unblocked.length > 0 ? unblocked[unblocked.length - 1].excess : 0;
+                const secondUnblocked = unblocked.length > 0 ? unblocked[0].excess : 0;
+                const candScore = minUnblocked * 20 + secondUnblocked * 10 - candElig.length * 5;
+                if (!bestLethalElig || candScore > bestLethalScore) {
+                    bestLethalScore = candScore;
+                    bestLethalElig = candElig;
+                }
+            }
+            return;
+        }
+
+        for (let d = 0; d <= rem; d++) {
+            if (d > 0 && baseAtks[idx].power + d < oL) continue; // 不浪費在未達標角色上
+            currentDon[idx] = d;
+            enumDon(idx + 1, rem - d);
+        }
+    }
+
+    enumDon(0, D);
+
+    const isLethal = lethalAllocs > 0;
+    const chosenElig = isLethal ? bestLethalElig : wfElig;
+
+    // 最佳攻擊順序：由小到大出拳（先用小拳騙出側防/事件，再用大拳壓迫 Blocker 與斬殺）
+    const orderedChosen = [...chosenElig].sort((a, b) => a.finalPower - b.finalPower);
+
+    let plan = [];
+    if (!fastOnly) {
+        const def = solveOrderedDefense(orderedChosen, B, life, oL, sc.hand, oppDon);
+        plan = def.steps;
+    }
+
+    return {
+        isLethal,
+        elig: orderedChosen,
+        plan,
+        totalValidAllocs,
+        lethalAllocs,
+        wfIsLethal,
+        allInIsLethal
+    };
 }
 
-function solveOrderedDefense(orderedAtks, blockers, life, oL, n1, n2) {
+// ─── 逐步攻防模擬 DP（含 Blocker、手牌側防、0費3K棄牌事件、1費4K留費事件）───
+function solveOrderedDefense(orderedAtks, blockers, life, oL, hand, oppDon) {
     const memo = new Map();
+    const hc = getHandCounts(hand);
 
     function isBetter(a, b) {
         if (a.survived !== b.survived) return a.survived;
@@ -1376,27 +1644,27 @@ function solveOrderedDefense(orderedAtks, blockers, life, oL, n1, n2) {
         return a.remVal > b.remVal;
     }
 
-    function search(idx, b, r1, r2, l) {
+    function search(idx, b, r0, r1, r2, r3, r4, rDon, l) {
         if (idx >= orderedAtks.length) {
             return {
                 survived: true,
                 lethalStep: idx,
                 finalLife: l,
-                remVal: r1 + r2 * 2 + b * 10,
+                remVal: r1 + r2 * 2 + r3 * 3 + Math.min(r4, rDon) * 4 + b * 10,
                 steps: []
             };
         }
 
-        const key = `${idx},${b},${r1},${r2},${l}`;
+        const key = `${idx},${b},${r0},${r1},${r2},${r3},${r4},${rDon},${l}`;
         if (memo.has(key)) return memo.get(key);
 
         const A = orderedAtks[idx];
         const T = Math.max(1, A.excess + 1);
         let best = null;
 
-        // Option 1: Block with Blocker
+        // 選項 1：使用 Blocker 擋下
         if (b > 0) {
-            const sub = search(idx + 1, b - 1, r1, r2, l);
+            const sub = search(idx + 1, b - 1, r0, r1, r2, r3, r4, rDon, l);
             const cand = {
                 ...sub,
                 steps: [{ ...A, stepType: 'blocked', resultText: '🛡️ 被 Blocker 擋下' }, ...sub.steps]
@@ -1404,29 +1672,49 @@ function solveOrderedDefense(orderedAtks, blockers, life, oL, n1, n2) {
             if (!best || isBetter(cand, best)) best = cand;
         }
 
-        // Option 2: Counter with cards from hand
-        const maxU2 = Math.min(r2, Math.ceil(T / 2));
-        for (let u2 = 0; u2 <= maxU2; u2++) {
-            const u1 = Math.max(0, T - u2 * 2);
-            if (u1 <= r1) {
-                if ((u1 > 0 && (u1 - 1 + u2 * 2 >= T)) || (u2 > 0 && (u1 + (u2 - 1) * 2 >= T))) {
-                    continue;
+        // 選項 2：使用手牌側防 & 反擊事件卡
+        const maxU4 = Math.min(r4, rDon, Math.ceil(T / 4));
+        for (let u4 = 0; u4 <= maxU4; u4++) {
+            const remAfter4 = T - u4 * 4;
+            const maxU3 = Math.min(r3, remAfter4 > 0 ? Math.ceil(remAfter4 / 3) : 0);
+            for (let u3 = 0; u3 <= maxU3; u3++) {
+                const remAfter3 = remAfter4 - u3 * 3;
+                const maxU2 = Math.min(r2, remAfter3 > 0 ? Math.ceil(remAfter3 / 2) : 0);
+                for (let u2 = 0; u2 <= maxU2; u2++) {
+                    const u1 = Math.max(0, remAfter3 - u2 * 2);
+                    if (u1 > r1) continue;
+
+                    const totalC = u1 + u2 * 2 + u3 * 3 + u4 * 4;
+                    if (u1 > 0 && totalC - 1 >= T) continue;
+                    if (u2 > 0 && totalC - 2 >= T) continue;
+                    if (u3 > 0 && totalC - 3 >= T) continue;
+                    if (u4 > 0 && totalC - 4 >= T) continue;
+
+                    const newDon = rDon - u4;
+                    const branches = getDiscardBranches(u3, r0, r1 - u1, r2 - u2, r3 - u3, r4 - u4, newDon);
+                    for (let bIdx = 0; bIdx < branches.length; bIdx++) {
+                        const br = branches[bIdx];
+                        const sub = search(idx + 1, b, br.r0, br.r1, br.r2, br.r3, br.r4, newDon, l);
+
+                        const parts = [];
+                        if (u4 > 0) parts.push(`${u4 > 1 ? u4 + '×' : ''}🔥4K事件(-${u4}費)`);
+                        if (u3 > 0) parts.push(`${u3 > 1 ? u3 + '×' : ''}⚡3K事件(${br.desc})`);
+                        if (u2 > 0) parts.push(`${u2}×2K`);
+                        if (u1 > 0) parts.push(`${u1}×1K`);
+
+                        const cand = {
+                            ...sub,
+                            steps: [{ ...A, stepType: 'countered', resultText: `🃏 被反擊 (${parts.join(' + ')})` }, ...sub.steps]
+                        };
+                        if (!best || isBetter(cand, best)) best = cand;
+                    }
                 }
-                const sub = search(idx + 1, b, r1 - u1, r2 - u2, l);
-                const parts = [];
-                if (u1 > 0) parts.push(u1 + '×1K');
-                if (u2 > 0) parts.push(u2 + '×2K');
-                const cand = {
-                    ...sub,
-                    steps: [{ ...A, stepType: 'countered', resultText: `🃏 被側防 (${parts.join(' + ')})` }, ...sub.steps]
-                };
-                if (!best || isBetter(cand, best)) best = cand;
             }
         }
 
-        // Option 3: Take hit to Life (only if life > 0)
+        // 選項 3：以生命卡承受傷害（僅當 life > 0）
         if (l > 0) {
-            const sub = search(idx + 1, b, r1, r2, l - 1);
+            const sub = search(idx + 1, b, r0, r1, r2, r3, r4, rDon, l - 1);
             const cand = {
                 ...sub,
                 steps: [{ ...A, stepType: 'hit-life', resultText: `❤️ 生命 ${l} → ${l - 1}` }, ...sub.steps]
@@ -1434,14 +1722,13 @@ function solveOrderedDefense(orderedAtks, blockers, life, oL, n1, n2) {
             if (!best || isBetter(cand, best)) best = cand;
         }
 
-        // Option 4: Lethal blow (when life == 0)
-        // Attack lands on 0 life -> lethal blow lands and battle ends immediately!
+        // 選項 4：0 生命時承受致命一擊（對局立即結束！）
         if (l === 0) {
             const cand = {
                 survived: false,
                 lethalStep: idx,
                 finalLife: 0,
-                remVal: r1 + r2 * 2 + b * 10,
+                remVal: r1 + r2 * 2 + r3 * 3 + Math.min(r4, rDon) * 4 + b * 10,
                 steps: [{ ...A, stepType: 'lethal-blow', resultText: '💀 斬殺！' }]
             };
             if (!best || isBetter(cand, best)) best = cand;
@@ -1451,11 +1738,11 @@ function solveOrderedDefense(orderedAtks, blockers, life, oL, n1, n2) {
         return best;
     }
 
-    return search(0, blockers, n1, n2, life);
+    return search(0, blockers, hc.c0, hc.c1, hc.c2, hc.c3, hc.c4, oppDon || 0, life);
 }
 
 function evalUserAttempt(sc, da, order) {
-    const oL = sc.oppLeader, B = sc.blockers, life = sc.life;
+    const oL = sc.oppLeader, B = sc.blockers, life = sc.life, oppDon = sc.oppDon || 0;
     const names = ['Leader'];
     const icons = ['👑'];
     const powers = [sc.myLeader];
@@ -1483,8 +1770,7 @@ function evalUserAttempt(sc, da, order) {
 
     if (atksOrdered.length === 0) return { isLethal: false, elig: [], plan: [] };
 
-    const n1 = sc.hand.filter(c => c === 1).length, n2 = sc.hand.filter(c => c === 2).length;
-    const def = solveOrderedDefense(atksOrdered, B, life, oL, n1, n2);
+    const def = solveOrderedDefense(atksOrdered, B, life, oL, sc.hand, oppDon);
     const ok = !def.survived;
     return { isLethal: ok, elig: atksOrdered, plan: def.steps };
 }
@@ -1559,7 +1845,7 @@ function renderSimScore() {
             <button class="diff-btn ${!isAdv ? 'active' : ''}" onclick="setDifficulty('expert')">🔥 高手模式</button>
         </div>
         <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px">
-            ${isAdv ? '精簡攻頻・DON 精準分配・陷阱分配檢驗' : '差之毫釐失之千里・極限容錯＆假斬殺陷阱'}
+            ${isAdv ? '精簡攻頻・留費事件卡反擊（0費3K / 1費4K）・陷阱分配檢驗' : '差之毫釐失之千里・雙事件防線＆留費心理戰・唯一解極限算力'}
         </div>
         <div>得分：<span class="score-num">${s.correct}</span> / <span class="score-num">${s.total}</span></div>
     `;
@@ -1567,13 +1853,14 @@ function renderSimScore() {
 
 function renderSimBoard() {
     const sc = simState.scenario;
+    const oppDon = sc.oppDon || 0;
     let h = '<div class="sim-board">';
     // My field
     h += '<div class="panel my-field"><div class="panel-title"><span>🏴‍☠️</span> 我方場面</div>';
     h += `<div class="sim-info-row leader-row"><span class="info-icon">👑</span><span class="info-label">Leader</span><span class="info-value">${sc.myLeader}K</span></div>`;
     for (let i = 0; i < sc.myChars.length; i++)
         h += `<div class="sim-info-row"><span class="info-icon">⚔️</span><span class="info-label">角色 ${i+1}</span><span class="info-value">${sc.myChars[i]}K</span></div>`;
-    h += `<div class="sim-info-row" style="margin-top:8px;border-color:var(--don-color)"><span class="info-icon">🔴</span><span class="info-label">DON!! 卡</span><span class="info-value" style="color:var(--don-color)">${sc.donCards} 張</span></div>`;
+    h += `<div class="sim-info-row" style="margin-top:8px;border-color:var(--don-color)"><span class="info-icon">🔴</span><span class="info-label">可用 DON!! 卡</span><span class="info-value" style="color:var(--don-color)">${sc.donCards} 張</span></div>`;
     h += '</div>';
     // Opp field
     h += '<div class="panel opp-field"><div class="panel-title"><span>⚓</span> 對方場面</div>';
@@ -1581,7 +1868,13 @@ function renderSimBoard() {
     for (let i = 0; i < sc.blockers; i++)
         h += `<div class="sim-info-row" style="border-color:var(--blocker-color)"><span class="info-icon">🛡️</span><span class="info-label">Blocker ${i+1}</span><span class="info-value" style="color:var(--accent-blue)">ON</span></div>`;
     h += `<div class="sim-info-row" style="margin-top:8px"><span class="info-icon">❤️</span><span class="info-label">生命卡</span><span class="info-value" style="color:var(--accent-red)">${sc.life} 張</span></div>`;
-    h += `<div class="sim-info-row"><span class="info-icon">🃏</span><span class="info-label">手牌（側防未知）</span><span class="info-value" style="color:var(--accent-purple)">${sc.handSize} 張</span></div>`;
+    h += `<div class="sim-info-row"><span class="info-icon">🃏</span><span class="info-label">手牌（含未知側防／事件）</span><span class="info-value" style="color:var(--accent-purple)">${sc.handSize} 張</span></div>`;
+
+    if (oppDon > 0) {
+        h += `<div class="sim-info-row active-don-row"><span class="info-icon">⚡</span><span class="info-label">留費 (Active DON!!)<span class="event-hint-tag warn">提防 1費+4K / 0費+3K</span></span><span class="info-value" style="color:#ff8c5a">${oppDon} 費</span></div>`;
+    } else {
+        h += `<div class="sim-info-row zero-don-row"><span class="info-icon">⚡</span><span class="info-label">留費 (Active DON!!)<span class="event-hint-tag zero">無留費（仍須提防 0費+3K 棄牌事件）</span></span><span class="info-value" style="color:var(--text-muted)">0 費</span></div>`;
+    }
     h += '</div></div>';
     document.getElementById('sim-board-area').innerHTML = h;
 }
@@ -1596,7 +1889,7 @@ function renderSimAlloc() {
 
     let h = '<div class="sim-alloc-section">';
     h += '<div class="sim-alloc-title"><span>🔴 DON 分配 & 攻擊順序</span></div>';
-    h += '<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:10px">可使用 ▲▼ 調整出手順序，＋/－ 分配 DON!!</div>';
+    h += '<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:10px">可使用 ▲▼ 調整出手順序，＋/－ 分配 DON!!（注意對手留費與 3K/4K 事件防線斷點！）</div>';
 
     for (let pos = 0; pos < simState.order.length; pos++) {
         const i = simState.order[pos];
@@ -1623,7 +1916,7 @@ function renderSimAlloc() {
     const needed = sc.life + 1 + sc.blockers;
     h += '<div class="don-rem-bar">';
     h += `<span>剩餘 DON：<span class="rem-num">${remain}</span> / ${sc.donCards}</span>`;
-    h += `<span style="font-size:0.8rem;color:var(--text-muted)">有效攻擊：${effCount} 個（需要 ${needed}）</span>`;
+    h += `<span style="font-size:0.8rem;color:var(--text-muted)">有效攻擊：${effCount} 個（基礎需 ${needed}）</span>`;
     h += '</div></div>';
     document.getElementById('sim-alloc-area').innerHTML = h;
 }
@@ -1642,57 +1935,100 @@ function renderSimActions(afterReveal) {
 
 function renderSimResult(r) {
     renderSimScore();
-    renderSimAlloc(); // re-render with disabled buttons
+    renderSimAlloc();
     renderSimActions(true);
     const sc = simState.scenario;
+    const oppDon = sc.oppDon || 0;
+    const hc = getHandCounts(sc.hand);
+
     let h = `<div class="sim-result ${r.isCorrect ? 'correct' : 'wrong'}">`;
     h += '<div class="sim-result-header">';
     if (r.isCorrect) {
         h += '<div class="sim-result-icon">🎉</div>';
         if (r.userAction === 'lethal') {
             h += '<div class="sim-result-title" style="color:var(--accent-green)">✅ 正確！成功斬殺！</div>';
-            h += '<div class="sim-result-subtitle">你的 DON 分配與攻擊順序成功突破了對方的防禦</div>';
+            h += '<div class="sim-result-subtitle">你的 DON 分配精準突破了對手的側防與事件卡防線！</div>';
         } else {
             h += '<div class="sim-result-title" style="color:var(--accent-green)">✅ 正確！這個場面確實無法斬殺</div>';
-            h += '<div class="sim-result-subtitle">即使最佳分配也無法突破對方防線，選擇 Pass 是正確判斷</div>';
+            h += '<div class="sim-result-subtitle">對手的側防與反擊事件防線滴水不漏，冷靜選擇 Pass 是最正確的判斷！</div>';
         }
     } else {
         h += '<div class="sim-result-icon">😢</div>';
         if (r.userAction === 'lethal') {
             h += '<div class="sim-result-title" style="color:var(--accent-red)">❌ 斬殺失敗！</div>';
             if (sc.isLethal) {
-                h += '<div class="sim-result-subtitle">你的 DON 分配或攻擊順序未能突破防禦，但<strong style="color:var(--accent-green)">其實存在成功的斬殺路線</strong>！請參考下方正確攻擊計劃</div>';
+                h += '<div class="sim-result-subtitle">你的 DON 分配被對手的防線（或反擊事件）擋下了，但<strong style="color:var(--accent-green)">其實存在唯一突破路線</strong>！請看下方解析</div>';
             } else {
-                h += '<div class="sim-result-subtitle">這個場面其實<strong>無法斬殺</strong>，即使最佳分配也不行。選擇「無法實行」是更好的判斷</div>';
+                h += '<div class="sim-result-subtitle">中計了！這個場面對手握有足夠的側防／反擊事件，<strong>無論如何分配都無法斬殺</strong>，應選擇「無法實行」</div>';
             }
         } else {
             h += '<div class="sim-result-title" style="color:var(--accent-red)">❌ 其實可以斬殺！</div>';
-            h += '<div class="sim-result-subtitle">這個場面存在成功的斬殺路線！請參考下方<strong style="color:var(--accent-green)">正確攻擊計劃</strong></div>';
+            h += '<div class="sim-result-subtitle">別被對手的留費或場面嚇退了！這個場面存在<strong style="color:var(--accent-green)">精妙的突破斬殺路線</strong>，請看下方正確攻擊計劃</div>';
         }
     }
     h += '</div>';
-    // Hand reveal
+
+    // Hand & Event reveal
     h += '<div class="hand-reveal">';
-    h += '<div class="hand-reveal-title">🃏 對方手牌揭曉</div>';
+    h += `<div class="hand-reveal-title">🃏 對方手牌 & 留費揭曉（留費：${oppDon} DON!!）</div>`;
     h += '<div class="hand-reveal-cards">';
+    let seen4 = 0;
     for (const c of sc.hand) {
-        const cls = c === 0 ? '' : ' val-' + c;
-        const txt = c === 0 ? '無' : c + 'K';
-        h += `<div class="hand-card${cls}" style="cursor:default;width:40px;height:54px;display:flex;align-items:center;justify-content:center;border-radius:7px;font-size:0.78rem;font-weight:700">${txt}</div>`;
+        if (c === 0) {
+            h += `<div class="hand-card" style="cursor:default;width:54px;height:62px;display:flex;flex-direction:column;align-items:center;justify-content:center;border-radius:8px;font-size:0.78rem;font-weight:700"><span>無</span><span style="font-size:0.6rem;opacity:0.7">0K</span></div>`;
+        } else if (c === 1 || c === 2) {
+            h += `<div class="hand-card val-${c}" style="cursor:default;width:54px;height:62px;display:flex;flex-direction:column;align-items:center;justify-content:center;border-radius:8px;font-size:0.82rem;font-weight:700"><span>+${c}K</span><span style="font-size:0.6rem;opacity:0.85">角色側防</span></div>`;
+        } else if (c === 3) {
+            h += `<div class="hand-card val-3" style="cursor:default;width:62px;height:62px;display:flex;flex-direction:column;align-items:center;justify-content:center;border-radius:8px;font-size:0.8rem;font-weight:800"><span>⚡+3K</span><span style="font-size:0.58rem">0費(棄1牌)</span></div>`;
+        } else if (c === 4) {
+            seen4++;
+            const isDead = seen4 > oppDon;
+            h += `<div class="hand-card val-4${isDead ? ' dead-event' : ''}" style="cursor:default;width:62px;height:62px;display:flex;flex-direction:column;align-items:center;justify-content:center;border-radius:8px;font-size:0.8rem;font-weight:800"><span>🔥+4K</span><span style="font-size:0.58rem">${isDead ? '1費(卡費!)' : '1費事件'}</span></div>`;
+        }
     }
-    const n1h = sc.hand.filter(c=>c===1).length, n2h = sc.hand.filter(c=>c===2).length;
-    const n0h = sc.hand.filter(c=>c===0).length;
     h += '</div>';
-    h += `<div style="font-size:0.8rem;color:var(--text-muted);margin-top:6px">側防卡：${n1h+n2h} 張`;
-    if (n1h+n2h > 0) {
-        const pp = []; if (n1h) pp.push(n1h+'×1K'); if (n2h) pp.push(n2h+'×2K');
-        h += ` (${pp.join(' + ')} = ${n1h+n2h*2}K)`;
+
+    // Summary line
+    const summaryParts = [];
+    if (hc.c4 > 0) {
+        const playable = Math.min(hc.c4, oppDon);
+        summaryParts.push(`${hc.c4}×1費4K事件${playable < hc.c4 ? `（僅 ${playable} 張有費用發動）` : ''}`);
     }
-    h += `，無側防：${n0h} 張</div></div>`;
+    if (hc.c3 > 0) summaryParts.push(`${hc.c3}×0費3K事件（需棄1手牌）`);
+    if (hc.c2 > 0) summaryParts.push(`${hc.c2}×2K`);
+    if (hc.c1 > 0) summaryParts.push(`${hc.c1}×1K`);
+    if (hc.c0 > 0) summaryParts.push(`${hc.c0}×無側防`);
+    h += `<div style="font-size:0.8rem;color:var(--text-muted);margin-top:6px">手牌構成：${summaryParts.join('、')}</div>`;
+
+    // Tactical Insight Box
+    const notes = [];
+    if (oppDon > 0 && hc.c4 === 0 && hc.c3 === 0) {
+        notes.push(`🎭 <strong>留費心理戰（Bluff）：</strong>對手故意留了 ${oppDon} 點費用假裝有事件卡，其實手牌只有普通側防！`);
+    }
+    if (hc.c4 > oppDon) {
+        notes.push(`⚠️ <strong>事件卡費：</strong>對手手握 ${hc.c4} 張 1費+4K 事件，但只留了 ${oppDon} 費，多出的 4K 事件無法發動（只能當作 0費3K 事件的棄牌代價）！`);
+    }
+    if (hc.c3 > 0) {
+        notes.push(`⚡ <strong>0費+3K事件特性：</strong>雖不需留費，但每發動 1 張需額外棄掉 1 張手牌（一次消耗 2 張手牌），因此小拳逼防能快速抽乾對手手牌！`);
+    }
+    if (sc.isLethal && sc.optResult && !sc.optResult.wfIsLethal) {
+        notes.push(`🎯 <strong>差之毫釐（反直覺分配）：</strong>這題若用傳統「平均分配 DON」會剛好撞上對手的事件卡或 Blocker 防線而失敗！必須採用不對稱分配（拉高主攻手跨過事件防禦斷點，或放棄弱小角色集中資源）才能斬殺！`);
+    }
+    if (!sc.isLethal) {
+        const optP1 = computeOptimal({ ...sc, donCards: sc.donCards + 1 }, true);
+        if (optP1.isLethal) {
+            notes.push(`🔍 <strong>極限假斬殺：</strong>這題我方只要再多 1 張 DON（1000 力量）就能突破，但當前資源剛好被對手的防線以 1K 之差完全鎖死！`);
+        }
+    }
+    if (notes.length > 0) {
+        h += `<div class="tactical-box">${notes.join('<br>')}</div>`;
+    }
+    h += '</div>';
+
     // Show plan
     const showPlan = r.userAction === 'lethal' && r.isCorrect ? r.userResult : sc.optResult;
     if (showPlan && showPlan.plan && showPlan.plan.length > 0) {
-        const planLabel = (r.userAction === 'lethal' && r.isCorrect) ? '你的攻擊計劃' : (sc.isLethal ? '✅ 正確攻擊計劃' : '最佳嘗試（仍無法斬殺）');
+        const planLabel = (r.userAction === 'lethal' && r.isCorrect) ? '你的攻擊計劃' : (sc.isLethal ? '✅ 正確攻擊計劃（最佳順序與分配）' : '最佳嘗試（仍被對手防住）');
         h += '<div class="sim-plan">';
         h += `<div class="sim-plan-title">⚔️ ${planLabel}</div>`;
         showPlan.plan.forEach((s, i) => {
@@ -1703,11 +2039,13 @@ function renderSimResult(r) {
             h += `<div class="power-detail">${donText} → 攻擊對方 Leader (${sc.oppLeader}K)</div></div>`;
             h += `<div class="step-result">${s.resultText}</div></div>`;
         });
-        // Show DON allocation for the optimal plan if user failed and there was a way
         if (!r.isCorrect && sc.isLethal && showPlan.elig) {
             h += '<div style="margin-top:12px;padding:10px 14px;background:var(--bg-card);border-radius:10px;border:1px solid var(--border-color);font-size:0.85rem;color:var(--text-secondary)">';
-            h += '<strong style="color:var(--accent-gold)">💡 最佳 DON 分配：</strong> ';
-            h += showPlan.elig.map(e => `${e.icon}${e.name}: ${e.power}K${e.don > 0 ? ' +' + e.don + 'DON → ' + e.finalPower + 'K' : ''}`).join('、');
+            h += '<strong style="color:var(--accent-gold)">💡 最佳 DON 分配（依出手順序）：</strong> ';
+            h += showPlan.elig.map(e => `${e.icon}${e.name}: ${e.power}K${e.don > 0 ? ' +' + e.don + 'DON → ' + e.finalPower + 'K' : ' (不加DON)'}`).join(' ➔ ');
+            if (showPlan.elig.length < 1 + sc.myChars.length) {
+                h += ' <span style="color:var(--accent-red);font-weight:600">（其餘低攻角色不分配 DON，集中資源突破！）</span>';
+            }
             h += '</div>';
         }
         h += '</div>';
